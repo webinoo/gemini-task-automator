@@ -17,6 +17,5 @@ target_link_libraries(GeminiAutomator PRIVATE
     nlohmann_json::nlohmann_json
 )
 
-set_target_properties(GeminiAutomator PROPERTIES
-    LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\""
-)
+# Tell MSVC linker not to generate an extra conflicting manifest
+target_link_options(GeminiAutomator PRIVATE /MANIFEST:NO)
