@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg-configuration.schema.json",
   "name": "gemini-automator",
   "version-string": "1.0.0",
-  "builtin-baseline": "363e7b7f168019b884d5f4144368dd924f3c7136",
+  "builtin-baseline": "50302b1f83c18c50e2ed2014023dd4195191a5ef",
   "dependencies": [
     "curl",
     "nlohmann-json"
