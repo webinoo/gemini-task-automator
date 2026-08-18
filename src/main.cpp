@@ -2,14 +2,19 @@
 #pragma comment(lib, "advapi32.lib")
 
 #include <iostream>
+#include <fstream>
 #include <string>
+#include <vector>
+#include <filesystem>
 #include <windows.h>
 #include <shellapi.h>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
+namespace fs = std::filesystem;
 using json = nlohmann::json;
 
+// --- Helper: Check Admin Rights ---
 bool IsRunAsAdmin() {
     BOOL isAdmin = FALSE;
     PSID adminGroup = NULL;
@@ -23,28 +28,53 @@ bool IsRunAsAdmin() {
     return isAdmin == TRUE;
 }
 
+// --- Network Callback ---
 size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
     size_t totalSize = size * nmemb;
-    std::string* str = static_cast<std::string*>(userp);
-    str->append(static_cast<char*>(contents), totalSize);
+    static_cast<std::string*>(userp)->append(static_cast<char*>(contents), totalSize);
     return totalSize;
 }
 
+// --- Extended System Automation Handlers ---
 namespace SystemActions {
+
     void OpenUrl(const std::string& url) {
         std::wstring wurl(url.begin(), url.end());
         ShellExecuteW(NULL, L"open", wurl.c_str(), NULL, NULL, SW_SHOWNORMAL);
-        std::cout << "[Action] Opening URL/Browser: " << url << "\n";
+        std::cout << "[Action] Opened URL: " << url << "\n";
     }
 
-    void LaunchApp(const std::string& appPath) {
-        std::wstring wapp(appPath.begin(), appPath.end());
+    void LaunchApp(const std::string& appIdentifier) {
+        std::wstring wapp(appIdentifier.begin(), appIdentifier.end());
+        
+        // Try direct ShellExecute (handles registered protocols like roblox:// or system apps)
         HINSTANCE res = ShellExecuteW(NULL, L"open", wapp.c_str(), NULL, NULL, SW_SHOWNORMAL);
+        
         if ((INT_PTR)res <= 32) {
-            std::string cmd = "start \"\" \"" + appPath + "\"";
+            // Fallback via Windows Command Shell / Protocol launcher
+            std::string cmd = "start \"\" \"" + appIdentifier + "\"";
             system(cmd.c_str());
         }
-        std::cout << "[Action] Launching app: " << appPath << "\n";
+        std::cout << "[Action] Launching app/protocol: " << appIdentifier << "\n";
+    }
+
+    void WriteToFile(const std::string& filePath, const std::string& content, bool append = false) {
+        try {
+            std::ios_base::openmode mode = std::ios::out;
+            if (append) mode |= std::ios::app;
+
+            std::ofstream file(filePath, mode);
+            if (!file.is_open()) {
+                std::cout << "[Error] Could not open file for writing: " << filePath << "\n";
+                return;
+            }
+
+            file << content;
+            file.close();
+            std::cout << "[Action] File successfully " << (append ? "appended" : "written") << ": " << filePath << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "[Error] File I/O exception: " << e.what() << "\n";
+        }
     }
 
     void ShutdownPC() {
@@ -63,6 +93,7 @@ namespace SystemActions {
     }
 }
 
+// --- Gemini AI Engine ---
 class GeminiAutomator {
 private:
     std::string apiKey;
@@ -71,29 +102,42 @@ private:
         return json::array({
             {
                 {"name", "open_url"},
-                {"description", "Opens a URL or specific web page/tab in the user's default browser or Opera GX."},
+                {"description", "Opens a web link or URL in default browser."},
                 {"parameters", {
                     {"type", "OBJECT"},
                     {"properties", {
-                        {"url", {{"type", "STRING"}, {"description", "The full URL to open, e.g. https://www.google.com"}}}
+                        {"url", {{"type", "STRING"}, {"description", "Full URL e.g. https://google.com"}}}
                     }},
                     {"required", json::array({"url"})}
                 }}
             },
             {
                 {"name", "launch_app"},
-                {"description", "Launches a Windows executable or application by name/executable path."},
+                {"description", "Launches executable files, third-party desktop apps (OBS, Roblox, Discord), or Windows protocols."},
                 {"parameters", {
                     {"type", "OBJECT"},
                     {"properties", {
-                        {"app_name", {{"type", "STRING"}, {"description", "Executable name or path, e.g. 'opera.exe', 'notepad.exe', 'calc.exe'"}}}
+                        {"app_name", {{"type", "STRING"}, {"description", "Executable name, protocol, or path. Examples: 'obs64.exe', 'roblox://', 'notepad.exe', 'calc.exe'"}}}
                     }},
                     {"required", json::array({"app_name"})}
                 }}
             },
             {
+                {"name", "edit_file"},
+                {"description", "Creates, modifies, or appends text to local files on the system."},
+                {"parameters", {
+                    {"type", "OBJECT"},
+                    {"properties", {
+                        {"file_path", {{"type", "STRING"}, {"description", "Path to file e.g. C:\\Users\\Public\\notes.txt"}}},
+                        {"content", {{"type", "STRING"}, {"description", "Text content to write or append"}}},
+                        {"append", {{"type", "BOOLEAN"}, {"description", "Set to true to append text instead of overwriting"}}}
+                    }},
+                    {"required", json::array({"file_path", "content"})}
+                }}
+            },
+            {
                 {"name", "shutdown_pc"},
-                {"description", "Shuts down or powers off the host Windows PC."},
+                {"description", "Shuts down the computer."},
                 {"parameters", {
                     {"type", "OBJECT"},
                     {"properties", json::object()}
@@ -105,20 +149,17 @@ private:
 public:
     void SetApiKey(const std::string& key) {
         apiKey = key;
-        std::cout << "[System] Gemini API key configured successfully.\n";
+        std::cout << "[System] Gemini API key configured.\n";
     }
 
     void ProcessCommand(const std::string& userPrompt) {
         if (apiKey.empty()) {
-            std::cout << "[Error] API Key not set! Use > /set-api (your_key) first.\n";
+            std::cout << "[Error] Set API key first using > /set-api <YOUR_KEY>\n";
             return;
         }
 
         CURL* curl = curl_easy_init();
-        if (!curl) {
-            std::cout << "[Error] Failed to initialize Network Subsystem.\n";
-            return;
-        }
+        if (!curl) return;
 
         std::string url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + apiKey;
 
@@ -144,8 +185,7 @@ public:
         std::string jsonStr = payload.dump();
         std::string responseBuffer;
 
-        struct curl_slist* headers = NULL;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        struct curl_slist* headers = curl_slist_append(NULL, "Content-Type: application/json");
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -157,16 +197,15 @@ public:
         curl_easy_cleanup(curl);
         curl_slist_free_all(headers);
 
-        if (res != CURLE_OK) {
+        if (res == CURLE_OK) {
+            ParseAndExecute(responseBuffer);
+        } else {
             std::cout << "[Network Error] Request failed: " << curl_easy_strerror(res) << "\n";
-            return;
         }
-
-        ParseAndExecuteResponse(responseBuffer);
     }
 
 private:
-    void ParseAndExecuteResponse(const std::string& rawResponse) {
+    void ParseAndExecute(const std::string& rawResponse) {
         try {
             auto resJson = json::parse(rawResponse);
 
@@ -183,22 +222,25 @@ private:
                 auto args = fnCall["args"];
 
                 if (fnName == "open_url") {
-                    std::string url = args.value("url", "https://google.com");
-                    SystemActions::OpenUrl(url);
+                    SystemActions::OpenUrl(args.value("url", "https://google.com"));
                 } 
                 else if (fnName == "launch_app") {
-                    std::string app = args.value("app_name", "");
-                    SystemActions::LaunchApp(app);
+                    SystemActions::LaunchApp(args.value("app_name", ""));
+                } 
+                else if (fnName == "edit_file") {
+                    std::string path = args.value("file_path", "");
+                    std::string content = args.value("content", "");
+                    bool append = args.value("append", false);
+                    SystemActions::WriteToFile(path, content, append);
                 } 
                 else if (fnName == "shutdown_pc") {
                     SystemActions::ShutdownPC();
                 }
             } else if (candidate.contains("text")) {
-                std::cout << "[Gemini Response] " << candidate["text"].get<std::string>() << "\n";
+                std::cout << "[Gemini] " << candidate["text"].get<std::string>() << "\n";
             }
-        } 
-        catch (const std::exception& e) {
-            std::cout << "[Parser Error] Failed to parse API output: " << e.what() << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "[Parser Error] " << e.what() << "\n";
         }
     }
 };
@@ -207,35 +249,29 @@ int main() {
     SetConsoleTitleA("Gemini Task Automator [ADMIN]");
 
     if (!IsRunAsAdmin()) {
-        std::cout << "====================================================\n";
-        std::cout << " WARNING: Application is NOT running as Administrator!\n";
-        std::cout << " Some administrative tasks or commands may fail.\n";
-        std::cout << "====================================================\n\n";
+        std::cout << "[!] WARNING: Not running as Administrator. Some system calls may be restricted.\n\n";
     } else {
-        std::cout << "[System status]: Running with Elevated Administrator privileges.\n\n";
+        std::cout << "[+] Status: Elevated Administrator privileges enabled.\n\n";
     }
 
     curl_global_init(CURL_GLOBAL_ALL);
     GeminiAutomator automator;
 
     std::cout << "====================================================\n";
-    std::cout << "          GEMINI WINDOWS TASK AUTOMATOR             \n";
+    std::cout << "        GEMINI TASK AUTOMATOR v2.0 (OPTIMIZED)       \n";
     std::cout << "====================================================\n";
-    std::cout << " Usage:\n";
-    std::cout << "  > /set-api <YOUR_GEMINI_API_KEY>\n";
-    std::cout << "  > open me an opera gx tab\n";
-    std::cout << "  > open notepad\n";
+    std::cout << " Examples:\n";
+    std::cout << "  > /set-api <YOUR_API_KEY>\n";
+    std::cout << "  > open roblox\n";
+    std::cout << "  > open obs studio\n";
+    std::cout << "  > write 'Hello World' to C:\\test.txt\n";
     std::cout << "  > shut down the pc\n";
-    std::cout << "  > exit\n";
     std::cout << "====================================================\n\n";
 
     std::string input;
     while (true) {
         std::cout << "Automator> ";
-        if (!std::getline(std::cin, input) || input == "exit") {
-            break;
-        }
-
+        if (!std::getline(std::cin, input) || input == "exit") break;
         if (input.empty()) continue;
 
         if (input.rfind("/set-api ", 0) == 0) {
